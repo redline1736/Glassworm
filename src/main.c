@@ -23,6 +23,7 @@ static void print_usage(const char *prog) {
     printf("Examples:\n");
     printf("  %s example.com output --url https://example.com/graqhql-api \n", prog);
     printf("  %s example.com output --gobuster ~/glassworm/results/ --tor\n", prog);
+    return;
 }
 void banner(){
     printf("\033[1;32m");  /* bold green (optional) */
@@ -32,7 +33,7 @@ void banner(){
     printf("| |_| || || (_| |\\__ \\\\__ \\ \\ V  V / | (_) || |   | | | | | |\n");
     printf(" \\____||_| \\__,_||___/|___/  \\_/\\_/   \\___/ |_|   |_| |_| |_|\n");
     printf("\033[0m");      /* reset color */
-    return 0;
+    return;
 }
 int main(int argc, char *argv[]){
     banner();

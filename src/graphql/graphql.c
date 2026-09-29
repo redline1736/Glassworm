@@ -948,7 +948,7 @@ int detect_graphql(char *api_path, char *graphql_path) {
 //     5. send the analysis result back over the socket
 //   Finish when all URLs are processed.
 // ------------------------------------------------------------------
-int graphql_scanning(char *path, bool gobuster, char target_url) {
+int graphql_scanning(char *path, bool gobuster, char *target_url) {
     /* ---------------- socket setup ---------------- */
     int fd = init_socket(SOCK_PATH);
     int client = accept_connection(fd);
@@ -961,7 +961,6 @@ int graphql_scanning(char *path, bool gobuster, char target_url) {
     FILE *f = fopen("glassworm/graphql/introspection.json", "r");
     if (!f) {
         fprintf(stderr, "Failed to open introspection.json\n");
-        fclose(graphql_file);
         close_socket(fd, client, SOCK_PATH);
         return 1;
     }
@@ -974,7 +973,6 @@ int graphql_scanning(char *path, bool gobuster, char target_url) {
         (long)fread(introspection_json, 1, json_size, f) != json_size) {
         free(introspection_json);
         fclose(f);
-        fclose(graphql_file);
         close_socket(fd, client, SOCK_PATH);
         return 1;
     }

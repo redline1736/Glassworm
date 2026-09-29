@@ -79,7 +79,7 @@ static char* read_json_from_file(const char *filename, long *out_len);
 static char* capture_introspection_check(const char *filename, size_t *out_len);
 int introspection_check(char *intro_json);
 int detect_graphql(char *api_path, char *graphql_path);
-int graphql_scanning(char *path);
+int graphql_scanning(char *path, bool gobuster, char *target_url);
 
 // ------------------------------------------------------------------
 // Helper: unwrap a GraphQL type (LIST, NON_NULL) into a string
@@ -952,6 +952,8 @@ int graphql_scanning(char *path, bool gobuster, char *target_url) {
     /* ---------------- socket setup ---------------- */
     int fd = init_socket(SOCK_PATH);
     int client = accept_connection(fd);
+    FILE *graphql_file = NULL;
+
     if (client < 0) {
         fprintf(stderr, "Failed to accept socket connection\n");
         close_socket(fd, client, SOCK_PATH);
@@ -1035,7 +1037,6 @@ int graphql_scanning(char *path, bool gobuster, char *target_url) {
 
         FILE *api_file = fopen(api_path, "w");
         if (!api_file) {
-            fclose(gobuster_file);
             close_socket(fd, client, SOCK_PATH);
             return 1;
         }

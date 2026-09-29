@@ -5,10 +5,11 @@ CFLAGS  += -Wall -Wextra -O2 -D_GNU_SOURCE -pthread \
            -Wno-format-truncation -Wno-sign-compare
 LIBS    := -lcurl -lpthread -lcjson
 
-SRCS = src/main.c src/util/util.c \
-       src/glassworm/graphql/graphql.c src/glassworm/http/http.c src/glassworm/sock/sock.c \
-       
-		
+SRCS = src/main.c \
+       src/graphql/graphql.c \
+       src/http/http.c \
+       src/sock/sock.c
+
 HDRS := $(wildcard src/*.h src/*/*.h)
 BIN  := sentinel
 

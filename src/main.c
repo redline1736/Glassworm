@@ -1,45 +1,56 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <stdbool.h>
 
-#include "graphql/graphql.h"
+#include "graphql/gq.h"
 #include "sock/sock.h"
 
-int run_graphql_scanning(char *path, char *url) {
-    // Placeholder for the actual scanning logic
-    printf("Scanning GraphQL files in path: %s\n", path);
-    if (path != NULL){
-        int result = graphql_scanning(path, true, NULL);
-        return result;
-    }else{
-        int result = graphql_scanning(NULL, false, url);
-        return result;       
-    }
-}
 static void print_usage(const char *prog) {
-    printf("Usage: %s <domain> <output_dir> <mode> [flags]\n", prog);
-    printf("  mode: --gobuster  analyze gobuster results \n");
-    printf("        --url");
+    printf("Usage: %s <mode> [value]\n", prog);
+    printf("  modes:\n");
+    printf("    --url <target_url>        scan a single GraphQL endpoint (output written to ./)\n");
+    printf("    --gobuster <gobuster_dir>  analyze gobuster.txt already in <gobuster_dir>\n");
     printf("Examples:\n");
-    printf("  %s example.com output --url https://example.com/graqhql-api \n", prog);
-    printf("  %s example.com output --gobuster ~/glassworm/results/ --tor\n", prog);
-    return;
+    printf("  %s --url https://example.com/graphql\n", prog);
+    printf("  %s --gobuster ~/gobuster/\n", prog);
 }
-void banner(){
-    printf("\033[1;32m");  /* bold green (optional) */
+
+void banner(void){
+    printf("\033[1;32m");
     printf("  ____  _ \n");
     printf(" / ___|| |  __ _  ___  ___ __      __  ___   _ __  _ __ ___  \n");
     printf("| |  _ | | / _` |/ __|/ __|\\ \\ /\\ / / / _ \\ | '__|| '_ ` _ \\ \n");
     printf("| |_| || || (_| |\\__ \\\\__ \\ \\ V  V / | (_) || |   | | | | | |\n");
     printf(" \\____||_| \\__,_||___/|___/  \\_/\\_/   \\___/ |_|   |_| |_| |_|\n");
-    printf("\033[0m");      /* reset color */
-    return;
+    printf("\033[0m");
 }
+
 int main(int argc, char *argv[]){
     banner();
-    if (argc < 2 || strcmp(argv[2], "-h") == 0 || strcmp(argv[2], "-help") == 0){
-        print_usage(argv[1]);
+
+    if (argc < 3) {
+        print_usage(argv[0]);
+        return 1;
     }
 
+    char *mode = argv[1];
 
+    if (strcmp(mode, "-h") == 0 || strcmp(mode, "--help") == 0) {
+        print_usage(argv[0]);
+        return 0;
+    }
+
+    if (strcmp(mode, "--url") == 0) {
+        char *target_url = argv[2];
+        return graphql_scanning(".", false, target_url);
+    }
+    else if (strcmp(mode, "--gobuster") == 0) {
+        char *gobuster_dir = argv[2];
+        return graphql_scanning(gobuster_dir, true, NULL);
+    }
+
+    fprintf(stderr, "Error: unknown mode '%s'\n\n", mode);
+    print_usage(argv[0]);
+    return 1;
 }

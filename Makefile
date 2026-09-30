@@ -6,12 +6,12 @@ CFLAGS  += -Wall -Wextra -O2 -D_GNU_SOURCE -pthread \
 LIBS    := -lcurl -lpthread -lcjson
 
 SRCS = src/main.c \
-       src/graphql/graphql.c \
+       src/graphql/gq.c \
        src/http/http.c \
        src/sock/sock.c
 
 HDRS := $(wildcard src/*.h src/*/*.h)
-BIN  := sentinel
+BIN  := Glassworm
 
 .PHONY: all clean sanitize
 

@@ -8,7 +8,7 @@
 
 #include "../http/http.h"
 #include "../sock/sock.h"
-#include "gq.h"
+#include "scan.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -771,4 +771,422 @@ static void free_field_info(FieldInfo *f) {
     free(f->args);
     f->name = f->type_string = f->default_value = NULL;
     f->args = NULL;
-   
+    f->num_args = 0;
+}
+
+static void free_type_info(TypeInfo *t) {
+    if (!t) return;
+    free(t->name);
+    free(t->kind);
+    free(t->description);
+
+    for (int i = 0; i < t->num_fields; i++) free_field_info(&t->fields[i]);
+    free(t->fields);
+
+    for (int i = 0; i < t->num_interfaces; i++) free(t->interfaces[i]);
+    free(t->interfaces);
+
+    for (int i = 0; i < t->num_enum_values; i++) free(t->enum_values[i].name);
+    free(t->enum_values);
+
+    for (int i = 0; i < t->num_input_fields; i++) free_field_info(&t->input_fields[i]);
+    free(t->input_fields);
+
+    for (int i = 0; i < t->num_possible_types; i++) free(t->possible_types[i]);
+    free(t->possible_types);
+
+    free(t->specified_by_url);
+    free(t);
+}
+
+static void free_schema_data(SchemaData *schema) {
+    if (!schema) return;
+    if (schema->query_type)        free_type_info(schema->query_type);
+    if (schema->mutation_type)     free_type_info(schema->mutation_type);
+    if (schema->subscription_type) free_type_info(schema->subscription_type);
+
+    for (int i = 0; i < schema->num_types; i++)
+        if (schema->types[i]) free_type_info(schema->types[i]);
+    free(schema->types);
+
+    for (int i = 0; i < schema->num_directives; i++) {
+        free(schema->directives[i].name);
+        for (int j = 0; j < schema->directives[i].num_args; j++) {
+            free(schema->directives[i].args[j].name);
+            free(schema->directives[i].args[j].type_string);
+        }
+        free(schema->directives[i].args);
+    }
+    free(schema->directives);
+    free(schema);
+}
+
+/* ------------------------------------------------------------------
+ * read_json_from_file: strips any preamble before the first '{'.
+ * Returns heap buffer, caller frees. No off-by-one past EOF.
+ * ------------------------------------------------------------------ */
+static char *read_json_from_file(const char *filename, long *out_len) {
+    FILE *file = fopen(filename, "rb");
+    if (!file) return NULL;
+
+    if (fseek(file, 0, SEEK_END) != 0) { fclose(file); return NULL; }
+    long length = ftell(file);
+    if (length < 0) { fclose(file); return NULL; }
+    rewind(file);
+
+    char *data = malloc((size_t)length + 1);
+    if (!data) { fclose(file); return NULL; }
+
+    size_t read_len = fread(data, 1, (size_t)length, file);
+    fclose(file);
+
+    if (read_len != (size_t)length) { free(data); return NULL; }
+    data[length] = '\0';
+
+    char *start = strchr(data, '{');
+    if (!start) { free(data); return NULL; }
+
+    if (start != data) {
+        size_t tail = (size_t)length - (size_t)(start - data);
+        memmove(data, start, tail);          /* no +1: NUL already at tail */
+        data[tail] = '\0';
+        length = (long)tail;
+    }
+
+    if (out_len) *out_len = length;
+    return data;
+}
+
+/* ------------------------------------------------------------------
+ * capture_introspection_check: capture stdout of introspection_check
+ * via open_memstream. Returns NULL if nothing was written.
+ * ------------------------------------------------------------------ */
+static char *capture_introspection_check(const char *filename, size_t *out_len) {
+    char   *buf = NULL;
+    size_t  len = 0;
+
+    FILE *mem = open_memstream(&buf, &len);
+    if (!mem) return NULL;
+
+    int saved_stdout = dup(fileno(stdout));
+    if (saved_stdout < 0) {
+        fclose(mem);
+        free(buf);
+        return NULL;
+    }
+
+    fflush(stdout);
+    if (dup2(fileno(mem), fileno(stdout)) < 0) {
+        close(saved_stdout);
+        fclose(mem);
+        free(buf);
+        return NULL;
+    }
+
+    (void)introspection_check((char *)filename);
+
+    fflush(stdout);
+    dup2(saved_stdout, fileno(stdout));
+    close(saved_stdout);
+    fclose(mem);   /* flushes and finalizes buf/len */
+
+    if (len == 0) { free(buf); return NULL; }
+    if (out_len) *out_len = len;
+    return buf;
+}
+
+/* ------------------------------------------------------------------
+ * Minimal framing over the socket so a single recv() can't truncate
+ * a 256 KB introspection response. Header is 8 ASCII digits, then
+ * the payload. If your peer uses a different protocol, replace these
+ * with matching read/write loops, or drop framing and read until EOF.
+ * ------------------------------------------------------------------ */
+static int send_framed_message(int fd, const char *msg, size_t len) {
+    char hdr[FRAME_HDR + 1];
+    snprintf(hdr, sizeof(hdr), "%08zu", len);
+    if (send_message(fd, hdr) < 0) return -1;
+    if (len > 0 && send_message(fd, msg) < 0) return -1;
+    return 0;
+}
+
+static char *recv_framed_message(int fd) {
+    char hdr[FRAME_HDR + 1] = {0};
+    /* Read exactly FRAME_HDR bytes. */
+    size_t got = 0;
+    while (got < FRAME_HDR) {
+        int n = receive_message(fd, hdr + got, FRAME_HDR - got);
+        if (n <= 0) return NULL;
+        got += (size_t)n;
+    }
+    hdr[FRAME_HDR] = '\0';
+
+    char *endp = NULL;
+    unsigned long long plen = strtoull(hdr, &endp, 10);
+    if (!endp || *endp != '\0' || plen == 0 || plen > (64ULL * 1024 * 1024))
+        return NULL;
+
+    char *buf = malloc((size_t)plen + 1);
+    if (!buf) return NULL;
+
+    size_t have = 0;
+    while (have < (size_t)plen) {
+        int n = receive_message(fd, buf + have, (size_t)plen - have);
+        if (n <= 0) { free(buf); return NULL; }
+        have += (size_t)n;
+    }
+    buf[plen] = '\0';
+    return buf;
+}
+
+/* ------------------------------------------------------------------
+ * introspection_check: parse JSON file, print schema + analysis.
+ * ------------------------------------------------------------------ */
+int introspection_check(char *intro_json) {
+    long length = 0;
+    char *data = read_json_from_file(intro_json, &length);
+    if (!data) {
+        fprintf(stderr, "Failed to read JSON from %s\n", intro_json);
+        return 1;
+    }
+
+    cJSON *json = cJSON_Parse(data);
+    free(data);
+
+    if (!json) {
+        const char *error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr) fprintf(stderr, "JSON Parse Error near: %s\n", error_ptr);
+        return 1;
+    }
+
+    SchemaData *schema = build_schema_data(json);
+    if (!schema) {
+        cJSON_Delete(json);
+        return 1;
+    }
+
+    print_schema_data(schema);
+    perform_security_analysis(schema);
+    free_schema_data(schema);
+    cJSON_Delete(json);
+    return 0;
+}
+
+/* ------------------------------------------------------------------
+ * detect_graphql: probe each URL in api_path with uni.json, write the
+ * ones that look like GraphQL into graphql_path. Returns 0 if any found.
+ * ------------------------------------------------------------------ */
+int detect_graphql(char *api_path, char *graphql_path) {
+    request r = {0};
+
+    FILE *f = fopen("glassworm/graphql/uni.json", "r");
+    if (!f) { fprintf(stderr, "Failed to open uni.json\n"); return 1; }
+
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }
+    long json_size = ftell(f);
+    if (json_size < 0) { fclose(f); return 1; }
+    rewind(f);
+
+    char *json = malloc((size_t)json_size + 1);
+    if (!json) { fclose(f); return 1; }
+    if ((long)fread(json, 1, (size_t)json_size, f) != json_size) {
+        free(json); fclose(f); return 1;
+    }
+    json[json_size] = '\0';
+    fclose(f);
+
+    FILE *api = fopen(api_path, "r");
+    if (!api) { free(json); return 1; }
+
+    FILE *graphql = fopen(graphql_path, "w");
+    if (!graphql) { free(json); fclose(api); return 1; }
+
+    char api_url[1024];
+    int found_any = 0;
+
+    while (fgets(api_url, sizeof(api_url), api)) {
+        api_url[strcspn(api_url, "\n")] = '\0';
+        if (api_url[0] == '\0') continue;
+
+        if (!http_send_post(&r, api_url, false, NULL, true, json)) {
+            fprintf(stderr, "HTTP POST failed for %s\n", api_url);
+            continue;
+        }
+        if (r.code != 200) {
+            fprintf(stderr, "Non-200 response for %s\n", api_url);
+            continue;
+        }
+
+        char *resp = read_json_from_file(r.filename, NULL);
+        if (!resp) continue;
+
+        if (strstr(resp, "__schema") || strstr(resp, "\"data\"") ||
+            strstr(resp, "\"errors\"") || strstr(resp, "\"query\"")) {
+            printf("[+] GraphQL detected at %s\n", api_url);
+            fprintf(graphql, "%s\n", api_url);
+            found_any = 1;
+        }
+        free(resp);
+    }
+
+    fclose(api);
+    fclose(graphql);
+    free(json);
+    return found_any ? 0 : 1;
+}
+
+/* ------------------------------------------------------------------
+ * graphql_scanning
+ * ------------------------------------------------------------------ */
+int graphql_scanning(char *path, bool gobuster, char *target_url) {
+    /* 1) Load introspection query up front. */
+    FILE *f = fopen("glassworm/graphql/introspection.json", "r");
+    if (!f) { fprintf(stderr, "Failed to open introspection.json\n"); return 1; }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }
+    long json_size = ftell(f);
+    if (json_size < 0) { fclose(f); return 1; }
+    rewind(f);
+
+    char *introspection_json = malloc((size_t)json_size + 1);
+    if (!introspection_json) { fclose(f); return 1; }
+    if ((long)fread(introspection_json, 1, (size_t)json_size, f) != json_size) {
+        free(introspection_json); fclose(f); return 1;
+    }
+    introspection_json[json_size] = '\0';
+    fclose(f);
+
+    char api_path[PATH_MAX];
+    char graphql_path[PATH_MAX];
+    snprintf(api_path,     sizeof(api_path),     "%s/api.txt",     path);
+    snprintf(graphql_path, sizeof(graphql_path), "%s/graphql.txt", path);
+
+    /* 2) Build api.txt (either filter gobuster, or write target_url). */
+    if (gobuster) {
+        char gobuster_path[PATH_MAX];
+        snprintf(gobuster_path, sizeof(gobuster_path), "%s/gobuster.txt", path);
+
+        FILE *gobuster_file = fopen(gobuster_path, "r");
+        if (!gobuster_file) {
+            fprintf(stderr, "Failed to open gobuster.txt\n");
+            free(introspection_json);
+            return 1;
+        }
+        FILE *api_file = fopen(api_path, "w");
+        if (!api_file) {
+            fclose(gobuster_file);
+            free(introspection_json);
+            return 1;
+        }
+        char gobuster_url[1024];
+        while (fgets(gobuster_url, sizeof(gobuster_url), gobuster_file)) {
+            gobuster_url[strcspn(gobuster_url, "\n")] = '\0';
+            if (strstr(gobuster_url, "graphql") || strstr(gobuster_url, "api"))
+                fprintf(api_file, "%s\n", gobuster_url);
+        }
+        fclose(gobuster_file);
+        fclose(api_file);
+    } else {
+        if (!target_url) {
+            fprintf(stderr, "No target_url and not in gobuster mode\n");
+            free(introspection_json);
+            return 1;
+        }
+        FILE *api_file = fopen(api_path, "w");
+        if (!api_file) { free(introspection_json); return 1; }
+        fprintf(api_file, "%s\n", target_url);
+        fclose(api_file);
+    }
+
+    /* 3) Probe endpoints, write graphql.txt. */
+    if (detect_graphql(api_path, graphql_path) == 0)
+        printf("[+] GraphQL detection completed.\n");
+    else
+        printf("[-] No GraphQL endpoints found.\n");
+
+    /* 4) Socket: bind + accept ONCE, before the loop. */
+    int fd = init_socket(SOCK_PATH);
+    if (fd < 0) {
+        fprintf(stderr, "Failed to init socket at %s\n", SOCK_PATH);
+        free(introspection_json);
+        return 1;
+    }
+    int client = accept_connection(fd);
+    if (client < 0) {
+        fprintf(stderr, "Failed to accept socket connection\n");
+        close_socket(fd, client, SOCK_PATH);
+        free(introspection_json);
+        return 1;
+    }
+
+    FILE *graphql_file = fopen(graphql_path, "r");
+    if (!graphql_file) {
+        fprintf(stderr, "Failed to open graphql.txt\n");
+        close_socket(fd, client, SOCK_PATH);
+        free(introspection_json);
+        return 1;
+    }
+
+    /* 5) Main loop: one round-trip per URL. */
+    request r = {0};
+    char graphql_url[1024];
+    int  sent_count = 0;
+
+    while (fgets(graphql_url, sizeof(graphql_url), graphql_file)) {
+        graphql_url[strcspn(graphql_url, "\n")] = '\0';
+        if (graphql_url[0] == '\0') continue;
+
+        /* 5a) Send the introspection *query* over the socket. */
+        if (send_framed_message(client, introspection_json,
+                                strlen(introspection_json)) < 0) {
+            fprintf(stderr, "[-] socket send failed for %s\n", graphql_url);
+            continue;
+        }
+        printf("[+] Sent introspection query over socket for %s\n", graphql_url);
+
+        /* 5b) Receive the peer's reply. */
+        char *peer_reply = recv_framed_message(client);
+        if (!peer_reply) {
+            fprintf(stderr, "[-] no/invalid socket reply for %s\n", graphql_url);
+            continue;
+        }
+
+        /* 5c) POST that reply to the GraphQL endpoint. */
+        if (!http_send_post(&r, graphql_url, false, NULL, true, peer_reply)) {
+            fprintf(stderr, "[-] HTTP POST failed for %s\n", graphql_url);
+            free(peer_reply);
+            continue;
+        }
+        free(peer_reply);
+
+        if (r.code != 200) {
+            fprintf(stderr, "[-] Non-200 (%d) from %s\n", (int)r.code, graphql_url);
+            continue;
+        }
+        sent_count++;
+        printf("[+] Response from %s saved to %s\n", graphql_url, r.filename);
+
+        /* 5d) Analyze, capture stdout, send analysis back over the socket. */
+        size_t analysis_len = 0;
+        char  *analysis = capture_introspection_check(r.filename, &analysis_len);
+        if (!analysis) {
+            fprintf(stderr, "[-] analysis failed for %s\n", graphql_url);
+            continue;
+        }
+
+        if (send_framed_message(client, analysis, analysis_len) < 0) {
+            fprintf(stderr, "[-] socket send (analysis) failed for %s\n",
+                    graphql_url);
+            free(analysis);
+            continue;
+        }
+        printf("[+] Sent analysis (%zu bytes) for %s\n",
+               analysis_len, graphql_url);
+        free(analysis);
+    }
+
+    fclose(graphql_file);
+    close_socket(fd, client, SOCK_PATH);
+    free(introspection_json);
+    printf("\n[+] Done. %d introspection responses analyzed.\n", sent_count);
+
+    return 0;
+}

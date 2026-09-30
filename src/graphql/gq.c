@@ -1050,58 +1050,43 @@ int graphql_scanning(char *path, bool gobuster, char *target_url) {
 
     while (fgets(graphql_url, sizeof(graphql_url), graphql_file)) {
         graphql_url[strcspn(graphql_url, "\n")] = '\0';
+        if (graphql_url[0] == '\0') continue;
 
-        printf("[+] Introspection query results %s\n", r.filename);
-
-        /* 1) Stand up the socket fresh for this URL and wait for a peer. */
-        int fd = init_socket(SOCK_PATH);
-        int client = accept_connection(fd);
-        if (client < 0) {
-            fprintf(stderr, "Failed to accept socket connection\n");
-            close_socket(fd, client, SOCK_PATH);
-            continue;
-        }
-
-        if (send_message(client, r.filename) < 0) {
-            fprintf(stderr, "[-] socket send failed for %s\n", graphql_url);
-            close_socket(fd, client, SOCK_PATH);
-            continue;
-        }
-        printf("[+] Sent introspection query over socket for %s\n", graphql_url);
-
-        /* 2) Receive the peer's response over the socket. */
-        int n = receive_message(client, recv_buffer, sizeof(recv_buffer) - 1);
-        if (n <= 0) {
-            fprintf(stderr, "[-] no socket reply for %s\n", graphql_url);
-            close_socket(fd, client, SOCK_PATH);
-            continue;
-        }
-        recv_buffer[n] = '\0';
-
-        /* 3) POST that response body to the GraphQL endpoint. */
-        if (!http_send_post(&r, graphql_url, false, NULL, true, recv_buffer)) {
+        /* 1) POST the introspection query to this endpoint. */
+        if (!http_send_post(&r, graphql_url, false, NULL, true, introspection_json)) {
             fprintf(stderr, "[-] HTTP POST failed for %s\n", graphql_url);
-            close_socket(fd, client, SOCK_PATH);
             continue;
         }
         if (r.code != 200) {
             fprintf(stderr, "[-] Non-200 (%d) from %s\n", (int)r.code, graphql_url);
-            close_socket(fd, client, SOCK_PATH);
             continue;
         }
         sent_count++;
         printf("[+] Response from %s saved to %s\n", graphql_url, r.filename);
 
-        /* 4) Analyze the HTTP response, capturing stdout into a string. */
+        /* 2) Analyze the saved JSON response, capturing stdout as a string. */
         size_t analysis_len = 0;
         char  *analysis = capture_introspection_check(r.filename, &analysis_len);
         if (!analysis) {
             fprintf(stderr, "[-] analysis failed for %s\n", graphql_url);
+            continue;
+        }
+
+        /* 3) Stand up the socket and hand the analysis to whoever connects. */
+        int fd = init_socket(SOCK_PATH);
+        if (fd < 0) {
+            fprintf(stderr, "[-] init_socket failed for %s\n", graphql_url);
+            free(analysis);
+            continue;
+        }
+        int client = accept_connection(fd);
+        if (client < 0) {
+            fprintf(stderr, "[-] accept_connection failed for %s\n", graphql_url);
+            free(analysis);
             close_socket(fd, client, SOCK_PATH);
             continue;
         }
 
-        /* 5) Send the analysis result back over the socket. */
         if (send_message(client, analysis) < 0) {
             fprintf(stderr, "[-] socket send (analysis) failed for %s\n",
                     graphql_url);
@@ -1113,7 +1098,6 @@ int graphql_scanning(char *path, bool gobuster, char *target_url) {
                analysis_len, graphql_url);
         free(analysis);
 
-        /* 6) Tear down this URL's socket before the next iteration. */
         close_socket(fd, client, SOCK_PATH);
     }
 

@@ -1086,7 +1086,9 @@ int graphql_scanning(char *path, bool gobuster, char *target_url) {
             close_socket(fd, client, SOCK_PATH);
             continue;
         }
-
+        char send_buffer[sizeof(analysis) + sizeof(r.filename) + 128];
+        snprintf(sizeof(send_buffer), send_buffer, "Analysis Results:\n %s \nInspection Raw:\n %s \n", analysis, r.filename);
+        
         if (send_message(client, analysis) < 0) {
             fprintf(stderr, "[-] socket send (analysis) failed for %s\n",
                     graphql_url);

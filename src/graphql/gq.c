@@ -52,7 +52,6 @@ typedef struct {
     char *specified_by_url;
 } TypeInfo;
 
-/* Tagged (was anonymous) so calloc(sizeof(*...)) is well-defined. */
 typedef struct {
     char *name;
     ArgInfo *args;
@@ -78,16 +77,17 @@ static EnumValueInfo  *parse_enum_value(cJSON *val_json);
 static TypeInfo       *parse_type(cJSON *type_json);
 static cJSON          *find_type_json_by_name(cJSON *types, const char *target);
 static SchemaData     *build_schema_data(cJSON *root);
-static void   print_field_info(FieldInfo *field, int indent);
-static void   print_type_info(TypeInfo *type, int indent);
-static void   print_schema_data(SchemaData *schema);
+static void   print_field_info(FILE *out, FieldInfo *field, int indent);
+static void   print_type_info(FILE *out, TypeInfo *type, int indent);
+static void   print_schema_data(FILE *out, SchemaData *schema);
+static void   perform_security_analysis(FILE *out, SchemaData *schema);
 static void   free_field_info(FieldInfo *f);
 static void   free_type_info(TypeInfo *t);
 static void   free_schema_data(SchemaData *schema);
-static void   perform_security_analysis(SchemaData *schema);
 static char  *read_json_from_file(const char *filename, long *out_len);
 static char  *capture_introspection_check(const char *filename, size_t *out_len);
 int introspection_check(char *intro_json);
+int introspection_check_to(FILE *out, char *intro_json);
 int detect_graphql(char *api_path, char *graphql_path);
 int graphql_scanning(char *path, bool gobuster, char *target_url);
 
@@ -289,7 +289,7 @@ static TypeInfo* parse_type(cJSON *type_json) {
 }
 
 /* ------------------------------------------------------------------
- * find_type_json_by_name (hoisted from inside build_schema_data)
+ * find_type_json_by_name
  * ------------------------------------------------------------------ */
 static cJSON *find_type_json_by_name(cJSON *types, const char *target) {
     int count = cJSON_GetArraySize(types);
@@ -431,88 +431,85 @@ static SchemaData* build_schema_data(cJSON *root) {
 /* ------------------------------------------------------------------
  * print_field_info
  * ------------------------------------------------------------------ */
-static void print_field_info(FieldInfo *field, int indent) {
-    for (int i = 0; i < indent; i++) printf("  ");
-    printf("%s", field->name);
+static void print_field_info(FILE *out, FieldInfo *field, int indent) {
+    for (int i = 0; i < indent; i++) fprintf(out, "  ");
+    fprintf(out, "%s", field->name);
 
     if (field->num_args > 0) {
-        printf("(");
+        fprintf(out, "(");
         for (int i = 0; i < field->num_args; i++) {
-            printf("%s: %s", field->args[i].name, field->args[i].type_string);
-            if (i < field->num_args - 1) printf(", ");
+            fprintf(out, "%s: %s", field->args[i].name, field->args[i].type_string);
+            if (i < field->num_args - 1) fprintf(out, ", ");
         }
-        printf(")");
+        fprintf(out, ")");
     } else {
-        printf("()");
+        fprintf(out, "()");
     }
 
-    printf(": %s", field->type_string);
-    if (field->is_deprecated) printf(" [deprecated]");
-    if (field->default_value) printf(" = %s", field->default_value);
-    printf("\n");
+    fprintf(out, ": %s", field->type_string);
+    if (field->is_deprecated) fprintf(out, " [deprecated]");
+    if (field->default_value) fprintf(out, " = %s", field->default_value);
+    fprintf(out, "\n");
 }
 
 /* ------------------------------------------------------------------
  * print_type_info
  * ------------------------------------------------------------------ */
-static void print_type_info(TypeInfo *type, int indent) {
+static void print_type_info(FILE *out, TypeInfo *type, int indent) {
     if (!type) return;
 
-    for (int i = 0; i < indent; i++) printf("  ");
-    printf("%s %s", type->kind, type->name);
-    if (type->description) {
-        printf("  # %s", type->description);
-    }
-    printf("\n");
+    for (int i = 0; i < indent; i++) fprintf(out, "  ");
+    fprintf(out, "%s %s", type->kind, type->name);
+    if (type->description) fprintf(out, "  # %s", type->description);
+    fprintf(out, "\n");
 
     const char *kind = type->kind;
 
     if (strcmp(kind, "OBJECT") == 0 || strcmp(kind, "INTERFACE") == 0) {
-        for (int i = 0; i < type->num_fields; i++) {
-            print_field_info(&type->fields[i], indent + 1);
-        }
+        for (int i = 0; i < type->num_fields; i++)
+            print_field_info(out, &type->fields[i], indent + 1);
+
         if (strcmp(kind, "OBJECT") == 0 && type->num_interfaces > 0) {
-            for (int i = 0; i < indent + 1; i++) printf("  ");
-            printf("implements ");
+            for (int i = 0; i < indent + 1; i++) fprintf(out, "  ");
+            fprintf(out, "implements ");
             for (int j = 0; j < type->num_interfaces; j++) {
-                printf("%s", type->interfaces[j]);
-                if (j < type->num_interfaces - 1) printf(", ");
+                fprintf(out, "%s", type->interfaces[j]);
+                if (j < type->num_interfaces - 1) fprintf(out, ", ");
             }
-            printf("\n");
+            fprintf(out, "\n");
         }
-        printf("\n");
+        fprintf(out, "\n");
     }
     else if (strcmp(kind, "ENUM") == 0) {
         for (int i = 0; i < type->num_enum_values; i++) {
-            for (int j = 0; j < indent + 1; j++) printf("  ");
-            printf("%s", type->enum_values[i].name);
-            if (type->enum_values[i].is_deprecated) printf(" [deprecated]");
-            printf("\n");
+            for (int j = 0; j < indent + 1; j++) fprintf(out, "  ");
+            fprintf(out, "%s", type->enum_values[i].name);
+            if (type->enum_values[i].is_deprecated) fprintf(out, " [deprecated]");
+            fprintf(out, "\n");
         }
-        printf("\n");
+        fprintf(out, "\n");
     }
     else if (strcmp(kind, "INPUT_OBJECT") == 0) {
-        for (int i = 0; i < type->num_input_fields; i++) {
-            print_field_info(&type->input_fields[i], indent + 1);
-        }
-        printf("\n");
+        for (int i = 0; i < type->num_input_fields; i++)
+            print_field_info(out, &type->input_fields[i], indent + 1);
+        fprintf(out, "\n");
     }
     else if (strcmp(kind, "SCALAR") == 0) {
         if (type->specified_by_url) {
-            for (int i = 0; i < indent + 1; i++) printf("  ");
-            printf("@specifiedBy(url: \"%s\")\n", type->specified_by_url);
+            for (int i = 0; i < indent + 1; i++) fprintf(out, "  ");
+            fprintf(out, "@specifiedBy(url: \"%s\")\n", type->specified_by_url);
         }
-        printf("\n");
+        fprintf(out, "\n");
     }
     else if (strcmp(kind, "UNION") == 0) {
         if (type->num_possible_types > 0) {
-            for (int i = 0; i < indent + 1; i++) printf("  ");
-            printf("= ");
+            for (int i = 0; i < indent + 1; i++) fprintf(out, "  ");
+            fprintf(out, "= ");
             for (int j = 0; j < type->num_possible_types; j++) {
-                printf("%s", type->possible_types[j]);
-                if (j < type->num_possible_types - 1) printf(" | ");
+                fprintf(out, "%s", type->possible_types[j]);
+                if (j < type->num_possible_types - 1) fprintf(out, " | ");
             }
-            printf("\n\n");
+            fprintf(out, "\n\n");
         }
     }
 }
@@ -520,62 +517,61 @@ static void print_type_info(TypeInfo *type, int indent) {
 /* ------------------------------------------------------------------
  * print_schema_data
  * ------------------------------------------------------------------ */
-static void print_schema_data(SchemaData *schema) {
+static void print_schema_data(FILE *out, SchemaData *schema) {
     if (!schema) return;
 
-    printf("\n========== GRAPHQL SCHEMA ==========\n\n");
+    fprintf(out, "\n========== GRAPHQL SCHEMA ==========\n\n");
 
     if (schema->query_type) {
-        printf("ROOT QUERY:\n");
-        print_type_info(schema->query_type, 0);
+        fprintf(out, "ROOT QUERY:\n");
+        print_type_info(out, schema->query_type, 0);
     }
     if (schema->mutation_type) {
-        printf("ROOT MUTATION:\n");
-        print_type_info(schema->mutation_type, 0);
+        fprintf(out, "ROOT MUTATION:\n");
+        print_type_info(out, schema->mutation_type, 0);
     } else {
-        printf("ROOT MUTATION: (none)\n\n");
+        fprintf(out, "ROOT MUTATION: (none)\n\n");
     }
     if (schema->subscription_type) {
-        printf("ROOT SUBSCRIPTION:\n");
-        print_type_info(schema->subscription_type, 0);
+        fprintf(out, "ROOT SUBSCRIPTION:\n");
+        print_type_info(out, schema->subscription_type, 0);
     } else {
-        printf("ROOT SUBSCRIPTION: (none)\n\n");
+        fprintf(out, "ROOT SUBSCRIPTION: (none)\n\n");
     }
 
-    printf("ALL CUSTOM TYPES:\n\n");
-    for (int i = 0; i < schema->num_types; i++) {
-        print_type_info(schema->types[i], 0);
-    }
+    fprintf(out, "ALL CUSTOM TYPES:\n\n");
+    for (int i = 0; i < schema->num_types; i++)
+        print_type_info(out, schema->types[i], 0);
 
     if (schema->num_directives > 0) {
-        printf("DIRECTIVES:\n");
+        fprintf(out, "DIRECTIVES:\n");
         for (int i = 0; i < schema->num_directives; i++) {
-            printf("  @%s", schema->directives[i].name);
+            fprintf(out, "  @%s", schema->directives[i].name);
             if (schema->directives[i].num_args > 0) {
-                printf("(");
+                fprintf(out, "(");
                 for (int j = 0; j < schema->directives[i].num_args; j++) {
-                    printf("%s: %s", schema->directives[i].args[j].name,
-                           schema->directives[i].args[j].type_string);
-                    if (j < schema->directives[i].num_args - 1) printf(", ");
+                    fprintf(out, "%s: %s", schema->directives[i].args[j].name,
+                            schema->directives[i].args[j].type_string);
+                    if (j < schema->directives[i].num_args - 1) fprintf(out, ", ");
                 }
-                printf(")");
+                fprintf(out, ")");
             }
-            printf("\n");
+            fprintf(out, "\n");
         }
-        printf("\n");
+        fprintf(out, "\n");
     }
 
-    printf("SUMMARY: %d custom types, %d directives\n\n",
-           schema->num_types, schema->num_directives);
+    fprintf(out, "SUMMARY: %d custom types, %d directives\n\n",
+            schema->num_types, schema->num_directives);
 }
 
 /* ------------------------------------------------------------------
  * perform_security_analysis
  * ------------------------------------------------------------------ */
-static void perform_security_analysis(SchemaData *schema) {
+static void perform_security_analysis(FILE *out, SchemaData *schema) {
     if (!schema) return;
 
-    printf("========== SECURITY ANALYSIS ==========\n\n");
+    fprintf(out, "========== SECURITY ANALYSIS ==========\n\n");
 
     const char *sensitive_keywords[] = {
         "password", "pass", "secret", "token", "apiKey", "apikey",
@@ -584,7 +580,7 @@ static void perform_security_analysis(SchemaData *schema) {
     };
     int num_keywords = sizeof(sensitive_keywords) / sizeof(sensitive_keywords[0]);
 
-    printf("SENSITIVE FIELDS:\n");
+    fprintf(out, "SENSITIVE FIELDS:\n");
     int found_sensitive = 0;
     for (int i = 0; i < schema->num_types; i++) {
         TypeInfo *t = schema->types[i];
@@ -593,7 +589,7 @@ static void perform_security_analysis(SchemaData *schema) {
                 FieldInfo *f = &t->fields[j];
                 for (int k = 0; k < num_keywords; k++) {
                     if (strstr(f->name, sensitive_keywords[k]) != NULL) {
-                        printf("  %s.%s : %s\n", t->name, f->name, f->type_string);
+                        fprintf(out, "  %s.%s : %s\n", t->name, f->name, f->type_string);
                         found_sensitive++;
                         break;
                     }
@@ -605,7 +601,7 @@ static void perform_security_analysis(SchemaData *schema) {
                 FieldInfo *f = &t->input_fields[j];
                 for (int k = 0; k < num_keywords; k++) {
                     if (strstr(f->name, sensitive_keywords[k]) != NULL) {
-                        printf("  %s (input) : %s\n", f->name, f->type_string);
+                        fprintf(out, "  %s (input) : %s\n", f->name, f->type_string);
                         found_sensitive++;
                         break;
                     }
@@ -613,25 +609,25 @@ static void perform_security_analysis(SchemaData *schema) {
             }
         }
     }
-    if (!found_sensitive) printf("  (none)\n");
+    if (!found_sensitive) fprintf(out, "  (none)\n");
 
     if (schema->mutation_type) {
-        printf("\nMUTATIONS (data modification):\n");
+        fprintf(out, "\nMUTATIONS (data modification):\n");
         TypeInfo *mut = schema->mutation_type;
         for (int i = 0; i < mut->num_fields; i++) {
             FieldInfo *f = &mut->fields[i];
-            printf("  %s(", f->name);
+            fprintf(out, "  %s(", f->name);
             for (int j = 0; j < f->num_args; j++) {
-                printf("%s: %s", f->args[j].name, f->args[j].type_string);
-                if (j < f->num_args - 1) printf(", ");
+                fprintf(out, "%s: %s", f->args[j].name, f->args[j].type_string);
+                if (j < f->num_args - 1) fprintf(out, ", ");
             }
-            printf(") -> %s\n", f->type_string);
+            fprintf(out, ") -> %s\n", f->type_string);
         }
     } else {
-        printf("\nMUTATIONS: (none)\n");
+        fprintf(out, "\nMUTATIONS: (none)\n");
     }
 
-    printf("\nLIST FIELDS (possible DoS):\n");
+    fprintf(out, "\nLIST FIELDS (possible DoS):\n");
     int found_lists = 0;
     for (int i = 0; i < schema->num_types; i++) {
         TypeInfo *t = schema->types[i];
@@ -639,17 +635,17 @@ static void perform_security_analysis(SchemaData *schema) {
             for (int j = 0; j < t->num_fields; j++) {
                 FieldInfo *f = &t->fields[j];
                 if (strstr(f->type_string, "[") != NULL) {
-                    printf("  %s.%s : %s\n", t->name, f->name, f->type_string);
+                    fprintf(out, "  %s.%s : %s\n", t->name, f->name, f->type_string);
                     found_lists++;
                 }
             }
         }
     }
-    if (!found_lists) printf("  (none)\n");
+    if (!found_lists) fprintf(out, "  (none)\n");
 
     const char *scalars[] = {"String", "Int", "Float", "Boolean", "ID"};
     int num_scalars = 5;
-    printf("\nOBJECT FIELDS (deep nesting potential):\n");
+    fprintf(out, "\nOBJECT FIELDS (deep nesting potential):\n");
     int found_objects = 0;
     for (int i = 0; i < schema->num_types; i++) {
         TypeInfo *t = schema->types[i];
@@ -664,22 +660,22 @@ static void perform_security_analysis(SchemaData *schema) {
                     }
                 }
                 if (!is_scalar && strchr(f->type_string, '[') == NULL) {
-                    printf("  %s.%s -> %s\n", t->name, f->name, f->type_string);
+                    fprintf(out, "  %s.%s -> %s\n", t->name, f->name, f->type_string);
                     found_objects++;
                 }
             }
         }
     }
-    if (!found_objects) printf("  (none)\n");
+    if (!found_objects) fprintf(out, "  (none)\n");
 
-    printf("\nDEPRECATED FIELDS:\n");
+    fprintf(out, "\nDEPRECATED FIELDS:\n");
     int found_deprecated = 0;
     for (int i = 0; i < schema->num_types; i++) {
         TypeInfo *t = schema->types[i];
         if (strcmp(t->kind, "OBJECT") == 0 || strcmp(t->kind, "INTERFACE") == 0) {
             for (int j = 0; j < t->num_fields; j++) {
                 if (t->fields[j].is_deprecated) {
-                    printf("  %s.%s\n", t->name, t->fields[j].name);
+                    fprintf(out, "  %s.%s\n", t->name, t->fields[j].name);
                     found_deprecated++;
                 }
             }
@@ -687,25 +683,25 @@ static void perform_security_analysis(SchemaData *schema) {
         if (strcmp(t->kind, "ENUM") == 0) {
             for (int j = 0; j < t->num_enum_values; j++) {
                 if (t->enum_values[j].is_deprecated) {
-                    printf("  %s.%s (enum)\n", t->name, t->enum_values[j].name);
+                    fprintf(out, "  %s.%s (enum)\n", t->name, t->enum_values[j].name);
                     found_deprecated++;
                 }
             }
         }
     }
-    if (!found_deprecated) printf("  (none)\n");
+    if (!found_deprecated) fprintf(out, "  (none)\n");
 
-    printf("\nRECOMMENDATIONS:\n");
-    if (schema->mutation_type) printf("  - Mutations exist: enforce authentication and authorization.\n");
-    if (found_sensitive) printf("  - Sensitive fields exposed: restrict access or use field-level permissions.\n");
-    if (found_lists) printf("  - List fields: implement pagination (first, after) to prevent DoS.\n");
-    if (found_objects) printf("  - Object fields: implement query depth limiting.\n");
-    printf("  - Disable introspection in production unless required.\n");
-    printf("=========================================\n\n");
+    fprintf(out, "\nRECOMMENDATIONS:\n");
+    if (schema->mutation_type) fprintf(out, "  - Mutations exist: enforce authentication and authorization.\n");
+    if (found_sensitive) fprintf(out, "  - Sensitive fields exposed: restrict access or use field-level permissions.\n");
+    if (found_lists) fprintf(out, "  - List fields: implement pagination (first, after) to prevent DoS.\n");
+    if (found_objects) fprintf(out, "  - Object fields: implement query depth limiting.\n");
+    fprintf(out, "  - Disable introspection in production unless required.\n");
+    fprintf(out, "=========================================\n\n");
 }
 
 /* ------------------------------------------------------------------
- * free_field_info / free_type_info (hoisted from inside free_schema_data)
+ * free_field_info / free_type_info
  * ------------------------------------------------------------------ */
 static void free_field_info(FieldInfo *f) {
     if (!f) return;
@@ -725,38 +721,25 @@ static void free_type_info(TypeInfo *t) {
     free(t->kind);
     free(t->description);
 
-    for (int i = 0; i < t->num_fields; i++) {
-        free_field_info(&t->fields[i]);
-    }
+    for (int i = 0; i < t->num_fields; i++) free_field_info(&t->fields[i]);
     free(t->fields);
 
-    for (int i = 0; i < t->num_interfaces; i++) {
-        free(t->interfaces[i]);
-    }
+    for (int i = 0; i < t->num_interfaces; i++) free(t->interfaces[i]);
     free(t->interfaces);
 
-    for (int i = 0; i < t->num_enum_values; i++) {
-        free(t->enum_values[i].name);
-    }
+    for (int i = 0; i < t->num_enum_values; i++) free(t->enum_values[i].name);
     free(t->enum_values);
 
-    for (int i = 0; i < t->num_input_fields; i++) {
-        free_field_info(&t->input_fields[i]);
-    }
+    for (int i = 0; i < t->num_input_fields; i++) free_field_info(&t->input_fields[i]);
     free(t->input_fields);
 
-    for (int i = 0; i < t->num_possible_types; i++) {
-        free(t->possible_types[i]);
-    }
+    for (int i = 0; i < t->num_possible_types; i++) free(t->possible_types[i]);
     free(t->possible_types);
 
     free(t->specified_by_url);
     free(t);
 }
 
-/* ------------------------------------------------------------------
- * free_schema_data
- * ------------------------------------------------------------------ */
 static void free_schema_data(SchemaData *schema) {
     if (!schema) return;
 
@@ -811,7 +794,6 @@ static char* read_json_from_file(const char *filename, long *out_len) {
     }
 
     if (start != data) {
-        /* removed the +1 — it read one byte past EOF */
         memmove(data, start, length - (start - data));
         length = length - (start - data);
         data[length] = '\0';
@@ -822,41 +804,51 @@ static char* read_json_from_file(const char *filename, long *out_len) {
 }
 
 /* ------------------------------------------------------------------
- * capture_introspection_check
+ * capture_introspection_check — writes analysis to a temp file and
+ * reads it back into a heap string.
  * ------------------------------------------------------------------ */
 static char* capture_introspection_check(const char *filename, size_t *out_len) {
-    char   *buf = NULL;
-    size_t  len = 0;
+    char tmpl[] = "/tmp/sentinel_analysis_XXXXXX";
+    int tmpfd = mkstemp(tmpl);
+    if (tmpfd < 0) return NULL;
 
-    FILE *mem = open_memstream(&buf, &len);
-    if (!mem) return NULL;
-
-    int saved_stdout = dup(fileno(stdout));
-    if (saved_stdout < 0) {
-        fclose(mem);
-        free(buf);
+    FILE *tmp = fdopen(tmpfd, "w+");
+    if (!tmp) {
+        close(tmpfd);
+        unlink(tmpl);
         return NULL;
     }
 
-    fflush(stdout);
-    dup2(fileno(mem), fileno(stdout));
+    int rc = introspection_check_to(tmp, (char *)filename);
+    fflush(tmp);
 
-    introspection_check((char *)filename);
+    if (fseek(tmp, 0, SEEK_END) != 0) { fclose(tmp); unlink(tmpl); return NULL; }
+    long len = ftell(tmp);
+    if (len < 0 || rc != 0) {
+        fclose(tmp);
+        unlink(tmpl);
+        return NULL;
+    }
+    rewind(tmp);
 
-    fflush(stdout);
-    dup2(saved_stdout, fileno(stdout));
-    close(saved_stdout);
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(tmp); unlink(tmpl); return NULL; }
 
-    fclose(mem);   /* flushes; finalizes buf and len */
+    size_t got = fread(buf, 1, (size_t)len, tmp);
+    buf[got] = '\0';
 
-    if (out_len) *out_len = len;
+    fclose(tmp);
+    unlink(tmpl);
+
+    if (got == 0) { free(buf); return NULL; }
+    if (out_len) *out_len = got;
     return buf;
 }
 
 /* ------------------------------------------------------------------
- * introspection_check
+ * introspection_check_to / introspection_check
  * ------------------------------------------------------------------ */
-int introspection_check(char *intro_json) {
+int introspection_check_to(FILE *out, char *intro_json) {
     long length;
     char *data = read_json_from_file(intro_json, &length);
     if (!data) {
@@ -874,16 +866,20 @@ int introspection_check(char *intro_json) {
     }
 
     SchemaData *schema = build_schema_data(json);
-    if (schema) {
-        print_schema_data(schema);
-        perform_security_analysis(schema);
-        free_schema_data(schema);
+    if (!schema) {
         cJSON_Delete(json);
-        return 0;
+        return 1;
     }
 
+    print_schema_data(out, schema);
+    perform_security_analysis(out, schema);
+    free_schema_data(schema);
     cJSON_Delete(json);
-    return 1;
+    return 0;
+}
+
+int introspection_check(char *intro_json) {
+    return introspection_check_to(stdout, intro_json);
 }
 
 /* ------------------------------------------------------------------
@@ -975,7 +971,6 @@ int graphql_scanning(char *path, bool gobuster, char *target_url) {
     introspection_json[json_size] = '\0';
     fclose(f);
 
-    char recv_buffer[1024 * 256];
     char api_path[512];
     char graphql_path[512];
 
@@ -1072,34 +1067,90 @@ int graphql_scanning(char *path, bool gobuster, char *target_url) {
             continue;
         }
 
-        /* 3) Stand up the socket and hand the analysis to whoever connects. */
+        /* Read the raw response file back in for inclusion in the message. */
+        FILE *file = fopen(r.filename, "rb");
+        if (!file) {
+            fprintf(stderr, "[-] cannot open %s\n", r.filename);
+            free(analysis);
+            continue;
+        }
+        if (fseek(file, 0, SEEK_END) != 0) {
+            fprintf(stderr, "[-] fseek failed for %s\n", r.filename);
+            fclose(file);
+            free(analysis);
+            continue;
+        }
+        long file_size = ftell(file);
+        if (file_size < 0) {
+            fprintf(stderr, "[-] ftell failed for %s\n", r.filename);
+            fclose(file);
+            free(analysis);
+            continue;
+        }
+        rewind(file);
+
+        char *file_contents = malloc((size_t)file_size + 1);
+        if (!file_contents) {
+            fprintf(stderr, "[-] malloc failed for %s\n", graphql_url);
+            fclose(file);
+            free(analysis);
+            continue;
+        }
+        size_t bytes_read = fread(file_contents, 1, (size_t)file_size, file);
+        file_contents[bytes_read] = '\0';
+        fclose(file);
+
+        /* Build the combined message. */
+        size_t raw_len = strlen(file_contents);
+        size_t msg_len = analysis_len + raw_len + 64;
+        char  *msg     = malloc(msg_len);
+        if (!msg) {
+            fprintf(stderr, "[-] malloc failed for %s\n", graphql_url);
+            free(file_contents);
+            free(analysis);
+            continue;
+        }
+        int written = snprintf(msg, msg_len,
+                               "Analysis Results:\n %s \nInspection Raw:\n %s \n",
+                               analysis, file_contents);
+        free(file_contents);
+
+        if (written < 0 || (size_t)written >= msg_len) {
+            fprintf(stderr, "[-] snprintf truncation for %s\n", graphql_url);
+            free(msg);
+            free(analysis);
+            continue;
+        }
+        printf("%s \n", msg);
+        /* 3) Stand up the socket and hand the message to whoever connects. */
         int fd = init_socket(SOCK_PATH);
         if (fd < 0) {
             fprintf(stderr, "[-] init_socket failed for %s\n", graphql_url);
+            free(msg);
             free(analysis);
             continue;
         }
         int client = accept_connection(fd);
         if (client < 0) {
             fprintf(stderr, "[-] accept_connection failed for %s\n", graphql_url);
+            free(msg);
             free(analysis);
             close_socket(fd, client, SOCK_PATH);
             continue;
         }
-        char send_buffer[sizeof(analysis) + sizeof(r.filename) + 128];
-        snprintf(sizeof(send_buffer), send_buffer, "Analysis Results:\n %s \nInspection Raw:\n %s \n", analysis, r.filename);
-        
-        if (send_message(client, analysis) < 0) {
+
+        if (send_message(client, msg) < 0) {
             fprintf(stderr, "[-] socket send (analysis) failed for %s\n",
                     graphql_url);
+            free(msg);
             free(analysis);
             close_socket(fd, client, SOCK_PATH);
             continue;
         }
-        printf("[+] Sent analysis (%zu bytes) for %s\n",
-               analysis_len, graphql_url);
-        free(analysis);
+        printf("[+] Sent analysis (%d bytes) for %s\n", written, graphql_url);
 
+        free(msg);
+        free(analysis);
         close_socket(fd, client, SOCK_PATH);
     }
 

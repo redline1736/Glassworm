@@ -8,7 +8,8 @@ LIBS    := -lcurl -lpthread -lcjson
 SRCS = src/main.c \
        src/graphql/gq.c \
        src/http/http.c \
-       src/sock/sock.c
+       src/sock/sock.c \
+       src/util/util.c
 
 HDRS := $(wildcard src/*.h src/*/*.h)
 BIN  := Glassworm

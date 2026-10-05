@@ -1,10 +1,9 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdbool.h>
 
+#include "global.h"
 #include "graphql/gq.h"
 #include "sock/sock.h"
+#include "util/util.h"
+#include "http/http.h"
 
 static void print_usage(const char *prog) {
     printf("Usage: %s <mode> [value]\n", prog);
@@ -33,6 +32,7 @@ int main(int argc, char *argv[]){
         print_usage(argv[0]);
         return 1;
     }
+    curl_http_init();
 
     char *mode = argv[1];
 
@@ -52,5 +52,7 @@ int main(int argc, char *argv[]){
 
     fprintf(stderr, "Error: unknown mode '%s'\n\n", mode);
     print_usage(argv[0]);
+    curl_http_cleanup();
+    
     return 1;
 }

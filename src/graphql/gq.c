@@ -1,7 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdbool.h>
+#include "../global.h"
 #include <unistd.h>
 #include <limits.h>
 #include <cjson/cJSON.h>
@@ -881,6 +878,18 @@ int introspection_check_to(FILE *out, char *intro_json) {
 int introspection_check(char *intro_json) {
     return introspection_check_to(stdout, intro_json);
 }
+
+
+
+// SCANNER FUNCTIONS TO LEARN PEDRO
+
+
+
+
+
+
+
+
 
 /* ------------------------------------------------------------------
  * detect_graphql
